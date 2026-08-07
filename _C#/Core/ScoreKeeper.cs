@@ -85,9 +85,10 @@ namespace NeonKatana
                 // never happened. Nothing else in this game asks the player to lose before it will
                 // remember what they did.
                 //
-                // A write per point sounds expensive and is not: PlayerPrefs is an in-memory
-                // dictionary and only Save() touches the disk, so this costs one dictionary write
-                // per new record — and a new record can only be set once per point scored.
+                // The number lands in memory on every point, which is what the labels read. The
+                // disk write behind it is throttled — see PlayerProgress.CommitHighScore. Past
+                // their old record every fruit sets a new one, and a synchronous file write per
+                // fruit is a stutter in the best part of the run.
                 // ==========================================
                 PlayerProgress.CommitHighScore(Score);
             }

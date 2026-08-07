@@ -36,21 +36,47 @@ namespace NeonKatana
             return true;
         }
 
+        /// <summary>When the record was last pushed all the way to disk.</summary>
+        static float lastFlushedAt = float.NegativeInfinity;
+
         /// <summary>
-        /// Stores the score if it beats the record <b>and writes it to disk at once</b>.
+        /// How long a freshly set record may live in memory before it is written down. Four
+        /// seconds of a run is a handful of points; four seconds of stutter is the run.
+        /// </summary>
+        const float FlushEverySeconds = 4f;
+
+        /// <summary>
+        /// Stores the score if it beats the record, and writes it to disk — but not on every call.
         /// <para>
         /// The record used to be filed away by <see cref="ScoreKeeper"/> when the run ended, and
         /// only then. A player who beat their best and then closed the game — or walked out through
-        /// the pause menu, or was killed by Android reclaiming memory — had beaten it for nothing:
-        /// nothing had been written, so nothing was there next time. This is the write that makes a
-        /// record real the moment it is set rather than the moment it is lost.
+        /// the pause menu, or was killed by Android reclaiming memory — had beaten it for nothing.
+        /// So it is written as it happens instead.
+        /// </para>
+        /// <para>
+        /// <b>Why this is throttled.</b> <see cref="PlayerPrefs"/> is a dictionary in memory and
+        /// <see cref="PlayerPrefs.Save"/> is the part that touches the disk — it serialises the
+        /// whole store and waits for the write. Once a player is past their old record, every
+        /// single fruit sets a new one, so saving on each would mean a synchronous file write
+        /// several times a second, on a phone, during the best part of the run. That is a stutter
+        /// exactly where it is least welcome.
+        /// </para>
+        /// <para>
+        /// The number is in memory the instant it is scored, which is what everything on screen
+        /// reads. Only the disk lags, by at most <see cref="FlushEverySeconds"/> — and every way a
+        /// run can end goes through <see cref="Save"/> unconditionally, so the lag can only ever
+        /// lose a few points to a crash, never to a player closing the game.
         /// </para>
         /// </summary>
         public static bool CommitHighScore(int score)
         {
             if (!TrySetHighScore(score)) return false;
 
+            if (Time.realtimeSinceStartup - lastFlushedAt < FlushEverySeconds) return true;
+
+            lastFlushedAt = Time.realtimeSinceStartup;
             Save();
+
             return true;
         }
 
@@ -178,6 +204,13 @@ namespace NeonKatana
 
         /// <summary>Writes to disk. Android can kill the app without warning, so call it early.</summary>
         public static void Save() => PlayerPrefs.Save();
+
+        /// <summary>
+        /// Forgets when the record was last written when play mode starts without a domain
+        /// reload, so the first record of a session is never held back by the last one's clock.
+        /// </summary>
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        static void ResetStaticState() => lastFlushedAt = float.NegativeInfinity;
 
         /// <summary>Wipes every saved value. Handy for a "reset progress" button while testing.</summary>
         public static void Clear()
