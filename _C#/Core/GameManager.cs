@@ -10,6 +10,13 @@ namespace NeonKatana
     {
         OutOfLives,
         BombSliced,
+
+        /// <summary>
+        /// The player left rather than lost — through the pause menu, by quitting, or because the
+        /// phone took the app away. New on the end: Unity saves the number, so inserting a value
+        /// ahead of the others would re-point every saved reference to them.
+        /// </summary>
+        Abandoned,
     }
 
     /// <summary>
@@ -50,8 +57,15 @@ namespace NeonKatana
         /// <summary>Fired with the new state whenever the game is paused or resumed.</summary>
         public event Action<bool> PauseChanged;
 
-        /// <summary>Fired exactly once, when the run ends.</summary>
+        /// <summary>Fired exactly once, when the run ends in a loss.</summary>
         public event Action<GameOverCause> GameOverReached;
+
+        /// <summary>
+        /// Fired exactly once, when the run ends because the player left rather than lost. Kept
+        /// apart from <see cref="GameOverReached"/> because the two want different audiences: this
+        /// one is for whoever writes the score down, and never for the lose screen.
+        /// </summary>
+        public event Action RunAbandoned;
 
         void Awake()
         {
@@ -136,7 +150,23 @@ namespace NeonKatana
             Time.timeScale = 1f;
 
             BankPlaytime();
+            FileTheRun();
+
             GameOverReached?.Invoke(cause);
+        }
+
+        /// <summary>
+        /// Writes the run's score and count to the save, before anybody is told the run is over.
+        /// <para>
+        /// The order is the point. What <see cref="ProgressService"/> uploads is read back out of
+        /// the device's save, so a run announced before its own numbers were written is a run
+        /// reported one short — and the server takes the larger of the two totals, so the short
+        /// one is not corrected until the next run happens to overtake it.
+        /// </para>
+        /// </summary>
+        static void FileTheRun()
+        {
+            if (ScoreKeeper.Instance != null) ScoreKeeper.Instance.FileRun();
         }
 
         // --- Buttons ---
@@ -148,6 +178,67 @@ namespace NeonKatana
         public void LoadMainMenu() => GameActions.Run(GameAction.OpenMainMenu);
 
         public void QuitGame() => GameActions.Run(GameAction.QuitGame);
+
+        // --- Leaving early ---
+
+        /// <summary>
+        /// Ends a run the player walked away from, so everything in it is filed exactly as it
+        /// would have been had they lost.
+        /// <para>
+        /// Nothing did this. A run only ever ended through <see cref="EndRun"/>, which only ever
+        /// ran when the last life went or a bomb was cut — so a player who beat their record and
+        /// then pressed Exit, or quit the app, or was pushed to the background by Android and
+        /// never came back, had beaten it for nothing. The score was not saved, the run was not
+        /// counted, and nothing was queued for the server.
+        /// </para>
+        /// <para>
+        /// Safe to call at any time, including on a run that has already finished or has not
+        /// really started: a finished run is left alone, and a run worth nothing is not worth
+        /// reporting as one.
+        /// </para>
+        /// </summary>
+        public void AbandonRun()
+        {
+            if (IsGameOver)
+            {
+                BankPlaytime();
+                return;
+            }
+
+            // Asked before IsGameOver is set, because it reads the run that is still in progress.
+            bool worthReporting = WorthReporting();
+
+            IsGameOver = true;
+            IsPaused = false;
+
+            // Leaving through the pause menu leaves the clock at zero otherwise, and the next
+            // scene inherits it as a game that will not move.
+            Time.timeScale = 1f;
+
+            BankPlaytime();
+
+            // A scene that was opened and immediately left is not a run. Reporting it would put an
+            // empty entry in the outbox every time somebody looked at the game and changed their
+            // mind, and the counters the server keeps would slowly fill with them.
+            if (!worthReporting) return;
+
+            FileTheRun();
+
+            // Deliberately NOT GameOverReached. That event is what raises the lose screen, and a
+            // player who pressed "back to menu" has not lost — they would get a flash of the
+            // game-over panel on their way out. This one is only listened to by the two things
+            // that keep score, both of which are safe to run while the scene is being torn down.
+            RunAbandoned?.Invoke();
+        }
+
+        /// <summary>Whether anything happened in this run that is worth telling anybody about.</summary>
+        bool WorthReporting()
+        {
+            bool scored = ScoreKeeper.Instance != null && ScoreKeeper.Instance.Score > 0;
+            bool lostALife = LivesRemaining < startingLives;
+
+            return scored || lostALife || RunSeconds >= 1f;
+        }
 
         // --- Playtime ---
 
@@ -173,12 +264,33 @@ namespace NeonKatana
             savedSeconds = RunSeconds;
         }
 
+        /// <summary>
+        /// The phone taking the app away. This may be the last moment the game ever gets — Android
+        /// can reclaim a backgrounded app without another word — so everything earned so far is
+        /// written to disk here.
+        /// <para>
+        /// It does <b>not</b> end the run, because most of the time this is a player glancing at a
+        /// message and coming straight back, and ending their run for it would be its own bug.
+        /// Nothing is lost by leaving it open: the record is written the moment it is beaten now,
+        /// not when the run ends, so a run that never resumes has already saved the only part of
+        /// itself the player would miss.
+        /// </para>
+        /// </summary>
         void OnApplicationPause(bool paused)
         {
-            if (paused) BankPlaytime();
+            if (!paused) return;
+
+            BankPlaytime();
+            PlayerProgress.Save();
         }
 
-        void OnApplicationQuit() => BankPlaytime();
+        void OnApplicationQuit() => AbandonRun();
+
+        /// <summary>
+        /// The editor's stop button, a desktop window being closed, and the scene being unloaded.
+        /// None of them reliably reach <see cref="OnApplicationQuit"/> in the middle of a run.
+        /// </summary>
+        void OnDisable() => AbandonRun();
 
         /// <summary>Clears the cached instance when play mode starts without a domain reload.</summary>
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]

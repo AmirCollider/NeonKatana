@@ -17,31 +17,36 @@ namespace NeonKatana
 
         TMP_Text label;
 
+        /// <summary>Kept so the handler comes off the service it actually went on to.</summary>
+        ProgressService progressService;
+
         void Awake() => label = GetComponent<TMP_Text>();
 
         void Start()
         {
+            progressService = ProgressService.Instance;
+
             Show(PlayerProgress.HighScore);
 
             // The record comes out of the same read as the name and the picture, which
             // ProgressService does once and hands round. This used to ask for a copy of its own on
             // the first frame of the menu, when nobody is signed in yet and the answer is always
             // "offline" — so a record set on another device never appeared.
-            if (ProgressService.Instance != null) ProgressService.Instance.ProfileChanged += ShowServerRecord;
+            if (progressService != null) progressService.ProfileChanged += ShowServerRecord;
 
             ShowServerRecord();
         }
 
         void OnDestroy()
         {
-            if (ProgressService.Instance != null) ProgressService.Instance.ProfileChanged -= ShowServerRecord;
+            if (progressService != null) progressService.ProfileChanged -= ShowServerRecord;
         }
 
         void ShowServerRecord()
         {
-            if (!askTheServer || ProgressService.Instance == null) return;
+            if (!askTheServer || progressService == null) return;
 
-            PlayerProfile profile = ProgressService.Instance.Profile;
+            PlayerProfile profile = progressService.Profile;
 
             // Silently keeping the local number is the right answer here: the menu should not
             // scold a player for being offline.

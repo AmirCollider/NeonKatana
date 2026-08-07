@@ -15,6 +15,11 @@ namespace NeonKatana
         const string RunsPlayedKey = "NeonKatana.RunsPlayed";
         const string LanguageKey = "NeonKatana.Language";
 
+        /// <summary>
+        /// Which account the totals below belong to. Empty means nobody has claimed them yet.
+        /// </summary>
+        const string OwnerKey = "NeonKatana.ProgressOwner";
+
         public static int HighScore => PlayerPrefs.GetInt(HighScoreKey, 0);
 
         /// <summary>How long the player has spent in the game across every session, in seconds.</summary>
@@ -28,6 +33,24 @@ namespace NeonKatana
             if (score <= HighScore) return false;
 
             PlayerPrefs.SetInt(HighScoreKey, score);
+            return true;
+        }
+
+        /// <summary>
+        /// Stores the score if it beats the record <b>and writes it to disk at once</b>.
+        /// <para>
+        /// The record used to be filed away by <see cref="ScoreKeeper"/> when the run ended, and
+        /// only then. A player who beat their best and then closed the game — or walked out through
+        /// the pause menu, or was killed by Android reclaiming memory — had beaten it for nothing:
+        /// nothing had been written, so nothing was there next time. This is the write that makes a
+        /// record real the moment it is set rather than the moment it is lost.
+        /// </para>
+        /// </summary>
+        public static bool CommitHighScore(int score)
+        {
+            if (!TrySetHighScore(score)) return false;
+
+            Save();
             return true;
         }
 
@@ -66,6 +89,62 @@ namespace NeonKatana
             if (playSeconds > PlaySeconds) { PlayerPrefs.SetFloat(PlaySecondsKey, playSeconds); changed = true; }
 
             if (changed) Save();
+        }
+
+        // --- Whose totals these are ---
+
+        /// <summary>The account the stored totals belong to, or empty when nobody has claimed them.</summary>
+        public static string Owner => PlayerPrefs.GetString(OwnerKey, string.Empty);
+
+        /// <summary>
+        /// Hands this device's totals to <paramref name="playerId"/>, wiping them first if they
+        /// belong to somebody else. Returns true when they were wiped.
+        ///
+        /// <para>
+        /// The totals here are a device's, and the game only ever had one set of them. So signing
+        /// out of one account and into another left the second account holding the first one's
+        /// record — and then, because what goes to the server is the running total rather than the
+        /// difference, <em>uploaded</em> it: sign in on a friend's phone and you took their high
+        /// score home with you, under your name, on the public board. That is the bug this closes,
+        /// and it closes it in the only direction that is safe. Totals earned by one person are
+        /// never handed to another.
+        /// </para>
+        /// <para>
+        /// Unclaimed totals are adopted rather than wiped. Someone who played before signing in
+        /// earned those, and the account they then sign into is theirs — so the score follows them
+        /// in. It is only the second, different account that starts from nothing, and it does not
+        /// stay at nothing for long: <see cref="AdoptIfHigher"/> fills it back in from that
+        /// account's own record as soon as the server answers.
+        /// </para>
+        /// </summary>
+        public static bool ClaimFor(string playerId)
+        {
+            if (string.IsNullOrWhiteSpace(playerId)) return false;
+
+            string current = Owner;
+
+            if (string.Equals(current, playerId, StringComparison.OrdinalIgnoreCase)) return false;
+
+            bool belongedToSomebodyElse = !string.IsNullOrEmpty(current);
+
+            if (belongedToSomebodyElse) ResetTotals();
+
+            PlayerPrefs.SetString(OwnerKey, playerId);
+            Save();
+
+            return belongedToSomebodyElse;
+        }
+
+        /// <summary>
+        /// Empties the lifetime totals, leaving the language and everything else alone. The server
+        /// keeps the real history, so this is a device forgetting rather than a player losing.
+        /// </summary>
+        public static void ResetTotals()
+        {
+            PlayerPrefs.SetInt(HighScoreKey, 0);
+            PlayerPrefs.SetInt(RunsPlayedKey, 0);
+            PlayerPrefs.SetFloat(PlaySecondsKey, 0f);
+            Save();
         }
 
         /// <summary>
@@ -107,6 +186,7 @@ namespace NeonKatana
             PlayerPrefs.DeleteKey(PlaySecondsKey);
             PlayerPrefs.DeleteKey(RunsPlayedKey);
             PlayerPrefs.DeleteKey(LanguageKey);
+            PlayerPrefs.DeleteKey(OwnerKey);
             Save();
         }
     }

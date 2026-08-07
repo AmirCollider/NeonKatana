@@ -62,7 +62,17 @@ namespace NeonKatana
 
                 case GameAction.OpenWebsite: OpenWebsite(url); break;
 
-                case GameAction.SignIn: WithSignIn(signIn => signIn.BeginSignIn()); break;
+                // Pressed while somebody is already signed in, this is a request to be somebody
+                // else — there is no other reason to press it twice. It used to start the same
+                // flow either way, and the flow put the new token on top of the old account's
+                // record, totals and outbox without noticing the person had changed.
+                case GameAction.SignIn:
+                    WithSignIn(signIn =>
+                    {
+                        if (signIn.IsSignedIn) signIn.SwitchAccount();
+                        else signIn.BeginSignIn();
+                    });
+                    break;
                 case GameAction.SignOut: WithSignIn(signIn => signIn.SignOut()); break;
                 case GameAction.PasteSignInCode: WithSignIn(signIn => signIn.PasteCodeFromClipboard()); break;
 
@@ -78,7 +88,12 @@ namespace NeonKatana
         {
             Time.timeScale = 1f;
 
-            if (GameManager.Instance != null) GameManager.Instance.BankPlaytimeNow();
+            // Not just the playtime. A run walked out of through the pause menu is still a run
+            // that happened, and the score in it is still a score the player made — abandoning it
+            // properly is what files both away. Leaving through this button used to keep the
+            // seconds and throw the score away, so a record broken on the way to the menu was
+            // gone by the time the menu drew it.
+            if (GameManager.Instance != null) GameManager.Instance.AbandonRun();
 
             SceneManager.LoadScene(sceneName);
         }
@@ -148,7 +163,7 @@ namespace NeonKatana
 
         static void Quit()
         {
-            if (GameManager.Instance != null) GameManager.Instance.BankPlaytimeNow();
+            if (GameManager.Instance != null) GameManager.Instance.AbandonRun();
 
             PlayerProgress.Save();
 

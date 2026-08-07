@@ -44,8 +44,21 @@ namespace NeonKatana
         /// </summary>
         static readonly Dictionary<string, Sprite> Loaded = new Dictionary<string, Sprite>();
 
+        /// <summary>How many times a picture that would not load is asked for again.</summary>
+        const int AttemptLimit = 3;
+
+        /// <summary>The wait before the next attempt, multiplied by which attempt this is.</summary>
+        const float RetryDelaySeconds = 1.5f;
+
         string showing;
         Coroutine loading;
+
+        /// <summary>The services this is listening to. See <see cref="SignInDisplay"/>.</summary>
+        SignInService signInService;
+        ProgressService progressService;
+
+        /// <summary>Whether the "signed in but no picture" note has already been made.</summary>
+        bool saidThereIsNoPicture;
 
         void Awake()
         {
@@ -57,16 +70,19 @@ namespace NeonKatana
 
         void Start()
         {
-            if (SignInService.Instance != null) SignInService.Instance.SignedInChanged += Refresh;
-            if (ProgressService.Instance != null) ProgressService.Instance.ProfileChanged += Refresh;
+            signInService = SignInService.Instance;
+            progressService = ProgressService.Instance;
+
+            if (signInService != null) signInService.SignedInChanged += Refresh;
+            if (progressService != null) progressService.ProfileChanged += Refresh;
 
             Refresh();
         }
 
         void OnDestroy()
         {
-            if (SignInService.Instance != null) SignInService.Instance.SignedInChanged -= Refresh;
-            if (ProgressService.Instance != null) ProgressService.Instance.ProfileChanged -= Refresh;
+            if (signInService != null) signInService.SignedInChanged -= Refresh;
+            if (progressService != null) progressService.ProfileChanged -= Refresh;
         }
 
         /// <summary>Puts the right face on the button for whoever is signed in.</summary>
@@ -91,6 +107,11 @@ namespace NeonKatana
                 Show(alreadyHere);
                 return;
             }
+
+            // A coroutine cannot be started on an object that is switched off, and both menu
+            // screens carry one of these — the account screen's spends most of its life inactive
+            // while the services it listens to go on raising events at it.
+            if (!isActiveAndEnabled) return;
 
             if (loading != null) StopCoroutine(loading);
             loading = StartCoroutine(Load(wanted));
@@ -136,6 +157,13 @@ namespace NeonKatana
 
             if (!signIn.IsSignedIn) return;   // Signed out is not a fault. The placeholder is right.
 
+            // Once. This runs on every sign-in change and every record that lands, and there is a
+            // perfectly ordinary moment — between the token arriving and the record following it —
+            // when there is genuinely nothing to show yet. Saying so each time buries the case
+            // where it never resolves, which is the only case worth reading.
+            if (saidThereIsNoPicture) return;
+            saidThereIsNoPicture = true;
+
             PlayerProfile profile = ProgressService.Instance != null ? ProgressService.Instance.Profile : null;
 
             Debug.LogWarning(
@@ -146,25 +174,79 @@ namespace NeonKatana
                 this);
         }
 
+        /// <summary>
+        /// Fetches the picture, and asks again when the answer was not really an answer.
+        /// <para>
+        /// One attempt was not enough. A failed load reports <c>0</c> and a transport message —
+        /// "Access denied", "Cannot connect", an empty error — none of which mean the picture is
+        /// missing; they mean the request did not complete. In the editor a scene change is a
+        /// reliable way to produce one, and there was nothing after it: the placeholder went up
+        /// and stayed up until the whole app was restarted, because the only thing that asks again
+        /// is somebody signing in or out.
+        /// </para>
+        /// </summary>
         IEnumerator Load(string url)
         {
-            using UnityWebRequest request = UnityWebRequestTexture.GetTexture(url);
-            request.timeout = requestTimeoutSeconds;
-
-            yield return request.SendWebRequest();
-
-            loading = null;
-
-            if (request.result != UnityWebRequest.Result.Success)
+            for (int attempt = 0; attempt < AttemptLimit; attempt++)
             {
-                // The placeholder is already on screen and is a perfectly good answer. A player
-                // with no signal does not need to be told their own face is missing.
-                Debug.Log($"The player's picture could not be loaded: {request.responseCode} {request.error}");
-                yield break;
+                if (attempt > 0) yield return new WaitForSecondsRealtime(RetryDelaySeconds * attempt);
+
+                // Whoever we are meant to be showing may have changed while we waited.
+                if (WantedPicture() != url) break;
+
+                bool worthRetrying;
+                Texture2D downloaded = null;
+
+                using (UnityWebRequest request = UnityWebRequestTexture.GetTexture(url))
+                {
+                    request.timeout = requestTimeoutSeconds;
+
+                    yield return request.SendWebRequest();
+
+                    if (request.result == UnityWebRequest.Result.Success)
+                    {
+                        downloaded = DownloadHandlerTexture.GetContent(request);
+                        worthRetrying = false;
+                    }
+                    else
+                    {
+                        // A 404 or a 403 is the address being wrong, and asking again will not
+                        // make it right. Anything else — a timeout, no route, a status of nothing
+                        // at all — is worth another go.
+                        worthRetrying = request.responseCode < 400 || request.responseCode >= 500;
+
+                        // The placeholder is already on screen and is a perfectly good answer. A
+                        // player with no signal does not need to be told their own face is missing.
+                        Debug.Log(
+                            $"The player's picture could not be loaded " +
+                            $"(attempt {attempt + 1} of {AttemptLimit}): {request.responseCode} {request.error}");
+                    }
+                }
+
+                // Outside the block on purpose. Disposing the request disposes its download
+                // handler, and the texture belongs to that handler until somebody else claims it —
+                // which is what Adopt does, with a hide flag, on its first line.
+                if (downloaded != null)
+                {
+                    loading = null;
+                    Adopt(url, downloaded);
+                    yield break;
+                }
+
+                if (!worthRetrying) break;
             }
 
-            Texture2D texture = DownloadHandlerTexture.GetContent(request);
-            if (texture == null) yield break;
+            loading = null;
+        }
+
+        /// <summary>Turns a downloaded texture into the sprite on the button.</summary>
+        void Adopt(string url, Texture2D texture)
+        {
+            if (texture == null) return;
+
+            // Claimed first. See the note further down: this is what stops the scene loader — and
+            // the request's own download handler — from taking it back.
+            texture.hideFlags = HideFlags.HideAndDontSave;
 
             texture.wrapMode = TextureWrapMode.Clamp;
 
@@ -174,6 +256,21 @@ namespace NeonKatana
                 texture,
                 new Rect(0f, 0f, texture.width, texture.height),
                 new Vector2(0.5f, 0.5f));
+
+            // ==========================================
+            // Kept out of the way of the scene loader.
+            //
+            // Loading a scene runs UnloadUnusedAssets, which destroys textures and sprites nothing
+            // in the new scene refers to. This cache is a static and holds them across exactly
+            // that boundary — which is the whole reason it exists, and also how it ended up
+            // holding a dictionary of destroyed objects after the first run: the entry was still
+            // there, the picture behind it was not, and the button either drew nothing or fell
+            // back to downloading the same face again on every scene change.
+            //
+            // HideAndDontSave is what tells the unloader these are spoken for. The texture is
+            // marked as it arrives, a few lines above; the sprite is marked here.
+            // ==========================================
+            sprite.hideFlags = HideFlags.HideAndDontSave;
 
             Loaded[url] = sprite;
             showing = url;
@@ -223,8 +320,28 @@ namespace NeonKatana
             picture.sprite = sprite;
         }
 
-        /// <summary>Empties the cache when play mode starts without a domain reload.</summary>
+        /// <summary>
+        /// Empties the cache when play mode starts without a domain reload.
+        /// <para>
+        /// The pictures are destroyed by hand rather than dropped. They are marked
+        /// <see cref="HideFlags.HideAndDontSave"/> so a scene load cannot take them, which also
+        /// means nothing else ever will: forgetting the dictionary would leave every face from
+        /// every previous play session sitting in memory for as long as the editor is open.
+        /// </para>
+        /// </summary>
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
-        static void ResetStaticState() => Loaded.Clear();
+        static void ResetStaticState()
+        {
+            foreach (Sprite sprite in Loaded.Values)
+            {
+                if (sprite == null) continue;
+
+                if (sprite.texture != null) Destroy(sprite.texture);
+
+                Destroy(sprite);
+            }
+
+            Loaded.Clear();
+        }
     }
 }

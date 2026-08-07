@@ -62,6 +62,14 @@ namespace NeonKatana
         /// <summary>Sent as text rather than a number so adding a cause cannot shift the others.</summary>
         public string cause;
 
+        /// <summary>
+        /// Whose run this was, stamped when it went into the outbox. Not sent to the server, which
+        /// takes ownership from the token — it is here so a queue that outlives a change of
+        /// account cannot post one player's scores under another's name. Empty on runs saved by a
+        /// build from before this existed.
+        /// </summary>
+        public string playerId;
+
         public static RunResult From(int score, float durationSeconds, int livesLost, GameOverCause cause) =>
             new RunResult
             {

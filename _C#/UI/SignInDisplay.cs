@@ -31,21 +31,34 @@ namespace NeonKatana
             if (userNameLabel != null) TextTranslator.LeaveAlone(userNameLabel);
         }
 
+        /// <summary>
+        /// The services this is listening to, kept rather than looked up again when it is time to
+        /// stop. <c>Instance</c> is a static: by the time this object is destroyed it may already
+        /// have been cleared, or point at the next scene's service — and then the handler never
+        /// comes off, the service goes on calling into a destroyed component, and Unity reports a
+        /// <c>MissingReferenceException</c> from somewhere that has nothing to do with the cause.
+        /// </summary>
+        SignInService signInService;
+        ProgressService progressService;
+
         void Start()
         {
-            if (SignInService.Instance != null) SignInService.Instance.SignedInChanged += Refresh;
+            signInService = SignInService.Instance;
+            progressService = ProgressService.Instance;
+
+            if (signInService != null) signInService.SignedInChanged += Refresh;
 
             // The chosen name arrives a moment after signing in, in the player's record, so this
             // corner has to be told twice: once when they sign in, and again when the record lands.
-            if (ProgressService.Instance != null) ProgressService.Instance.ProfileChanged += Refresh;
+            if (progressService != null) progressService.ProfileChanged += Refresh;
 
             Refresh();
         }
 
         void OnDestroy()
         {
-            if (SignInService.Instance != null) SignInService.Instance.SignedInChanged -= Refresh;
-            if (ProgressService.Instance != null) ProgressService.Instance.ProfileChanged -= Refresh;
+            if (signInService != null) signInService.SignedInChanged -= Refresh;
+            if (progressService != null) progressService.ProfileChanged -= Refresh;
         }
 
         /// <summary>Puts the corner back in step with who is signed in.</summary>

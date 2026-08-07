@@ -52,20 +52,39 @@ namespace NeonKatana
             this.timeoutSeconds = timeoutSeconds;
         }
 
+        /// <summary>
+        /// Whether it is worth trying. Deliberately not "whether it will work".
+        /// <para>
+        /// <see cref="Application.internetReachability"/> used to be part of this and is not any
+        /// more. It reports what kind of connection the device <em>has</em>, not whether anything
+        /// is reachable over it, and it answers <c>NotReachable</c> on plenty of machines that are
+        /// perfectly online — editors on Linux, desktops behind a VPN, anything where Unity cannot
+        /// read the interface. On those, this returned false forever: no profile was ever read, no
+        /// score was ever sent, and nothing said why, because "offline" is not an error anybody
+        /// logs. A request that has nowhere to go fails in a second and says so, which is a better
+        /// answer than never asking.
+        /// </para>
+        /// </summary>
         public bool IsAvailable =>
             !string.IsNullOrEmpty(baseUrl) &&
             !string.IsNullOrEmpty(gameId) &&
             !string.IsNullOrEmpty(IdToken) &&
-            !string.IsNullOrEmpty(PlayerId) &&
-            Application.internetReachability != NetworkReachability.NotReachable;
+            !string.IsNullOrEmpty(PlayerId);
 
         string IdToken => idTokenProvider != null ? idTokenProvider() : null;
 
         string PlayerId => playerIdProvider != null ? playerIdProvider() : null;
 
+        /// <summary>
+        /// Whether the object running the coroutines is still there to run them. Requests start
+        /// from scene teardown now — a run left mid-way is still a run — and
+        /// <see cref="MonoBehaviour.StartCoroutine"/> on a component being destroyed throws.
+        /// </summary>
+        bool HostCanRun => host != null && host.isActiveAndEnabled;
+
         public void LoadProfile(Action<PlayerProfile, string> onDone)
         {
-            if (!IsAvailable)
+            if (!IsAvailable || !HostCanRun)
             {
                 onDone?.Invoke(null, "Nobody is signed in, or the server cannot be reached.");
                 return;
@@ -84,7 +103,7 @@ namespace NeonKatana
         /// </summary>
         public void SubmitRun(RunResult run, PlayerProfile totals, Action<bool, string> onDone)
         {
-            if (!IsAvailable)
+            if (!IsAvailable || !HostCanRun)
             {
                 onDone?.Invoke(false, "Nobody is signed in, or the server cannot be reached.");
                 return;
@@ -130,7 +149,7 @@ namespace NeonKatana
 
         public void LoadLeaderboard(Action<LeaderboardEntry[], string> onDone)
         {
-            if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(gameId))
+            if (string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(gameId) || !HostCanRun)
             {
                 onDone?.Invoke(Array.Empty<LeaderboardEntry>(), "No server address is set.");
                 return;

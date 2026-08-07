@@ -56,8 +56,12 @@ namespace NeonKatana
             "out and the outbox has nobody to send as.")]
         [SerializeField] bool keepSignedIn = true;
 
-        [Tooltip("Keep signing-in alive through scene changes, so a run can upload without returning to the menu.")]
-        [SerializeField] bool surviveSceneChanges;
+        // The session outlives a scene change on its own now — see SignInSession. There used to be
+        // a "survive scene changes" tick box here that did it by keeping this component alive with
+        // DontDestroyOnLoad, which nobody could safely turn on: this component shares MenuServices
+        // with MenuScreens, MenuFruitShowcase and the localisation services, and carrying it over
+        // carries all of them into the game scene too. So it stayed off, and the session died with
+        // the menu after every single run.
 
         [Tooltip("On desktop, watch the clipboard while the browser is open and take the code by itself.")]
         [SerializeField] bool watchClipboard = true;
@@ -71,14 +75,28 @@ namespace NeonKatana
         /// <summary>How long before the token runs out we go and get a fresh one.</summary>
         const float RenewAheadSeconds = 300f;
 
+        /// <summary>How many times a refusal that looks temporary is tried again.</summary>
+        const int RefreshAttemptLimit = 3;
+
+        /// <summary>The wait before the next attempt, multiplied by which attempt this is.</summary>
+        const float RetryDelaySeconds = 2f;
+
         string pendingState;
         string lastClipboardSeen;
-        string refreshToken;
         Coroutine keepingFresh;
+
+        /// <summary>True while a refresh is in flight, so two never spend the same grant.</summary>
+        bool refreshing;
+
+        /// <summary>A name remembered from a previous launch, shown until a token confirms it.</summary>
+        string rememberedUserName;
+
+        /// <summary>The player id remembered from a previous launch. See <see cref="PlayerId"/>.</summary>
+        string rememberedPlayerId;
 
         bool UsesDeepLink => Application.platform == RuntimePlatform.Android;
 
-        public bool IsSignedIn => !string.IsNullOrEmpty(PlayerId) && !string.IsNullOrEmpty(IdToken);
+        public bool IsSignedIn => SignInSession.IsSignedIn;
 
         /// <summary>True between opening the browser and the code coming back.</summary>
         public bool IsWaitingForBrowser { get; private set; }
@@ -87,26 +105,32 @@ namespace NeonKatana
         /// The Google id_token. Never written to disk: it expires anyway, and a stale one sitting
         /// on a shared device is worth more to somebody else than it is to this game.
         /// </summary>
-        public string IdToken { get; private set; }
+        public string IdToken => SignInSession.IdToken;
 
         /// <summary>
         /// The id the server keeps this player's row under. See <see cref="PlayerIdFromEmail"/> —
         /// it is derived from the address, not from the token's <c>sub</c>.
+        /// <para>
+        /// Falls back to the id remembered from a previous launch, so the menu can put a name on
+        /// screen while the token that proves it is still being fetched.
+        /// </para>
         /// </summary>
-        public string PlayerId { get; private set; }
+        public string PlayerId => !string.IsNullOrEmpty(SignInSession.PlayerId)
+            ? SignInSession.PlayerId
+            : rememberedPlayerId;
 
         /// <summary>
         /// The token's <c>sub</c> claim: Google's own id for this person. Kept because it is the
         /// only genuinely unique id we have, but it is <em>not</em> what the server's paths use.
         /// </summary>
-        public string GoogleSubject { get; private set; }
+        public string GoogleSubject => SignInSession.GoogleSubject;
 
         /// <summary>
         /// The name on the Google account. It is not a username and cannot become one: the server
         /// only accepts 3 to 12 English letters and digits, and this is whatever the person put on
         /// their account — Persian, spaces and all.
         /// </summary>
-        public string GoogleName { get; private set; }
+        public string GoogleName => SignInSession.GoogleName;
 
         /// <summary>
         /// What to call this player until the server has a name they chose for themselves: the
@@ -119,19 +143,21 @@ namespace NeonKatana
         /// was missing or too short. A name nobody chose is not worth a leaked address.
         /// </para>
         /// </summary>
-        public string UserName { get; private set; }
+        public string UserName => !string.IsNullOrEmpty(SignInSession.UserName)
+            ? SignInSession.UserName
+            : rememberedUserName;
 
         /// <summary>The address on the token. The server's player id is derived from it.</summary>
-        public string Email { get; private set; }
+        public string Email => SignInSession.Email;
 
         /// <summary>
         /// The picture on the Google account, straight off the token. Shown until the player's own
         /// record arrives, which may name a different one they chose on the site.
         /// </summary>
-        public string PictureUrl { get; private set; }
+        public string PictureUrl => SignInSession.PictureUrl;
 
         /// <summary>True when a stored session could be picked back up without a browser.</summary>
-        public bool CanResume => !string.IsNullOrEmpty(refreshToken);
+        public bool CanResume => !string.IsNullOrEmpty(SignInSession.RefreshToken);
 
         /// <summary>Raised whenever somebody signs in or out, and when an attempt fails.</summary>
         public event Action SignedInChanged;
@@ -151,15 +177,16 @@ namespace NeonKatana
 
             Instance = this;
 
-            if (surviveSceneChanges) DontDestroyOnLoad(gameObject);
-
             if (rememberMe)
             {
-                PlayerId = PlayerPrefs.GetString(PlayerIdKey, string.Empty);
-                UserName = WithoutTheId(PlayerPrefs.GetString(UserNameKey, string.Empty), PlayerId);
+                rememberedPlayerId = PlayerPrefs.GetString(PlayerIdKey, string.Empty);
+                rememberedUserName = WithoutTheId(PlayerPrefs.GetString(UserNameKey, string.Empty), rememberedPlayerId);
             }
 
-            if (keepSignedIn) refreshToken = PlayerPrefs.GetString(RefreshTokenKey, string.Empty);
+            // Only when the session has none. A session carried over from the menu already holds
+            // the newest one, and the copy on disk may be a grant Google has since rotated away.
+            if (keepSignedIn && string.IsNullOrEmpty(SignInSession.RefreshToken))
+                SignInSession.RememberRefreshToken(PlayerPrefs.GetString(RefreshTokenKey, string.Empty));
 
             Application.deepLinkActivated += OnDeepLinkActivated;
 
@@ -172,9 +199,28 @@ namespace NeonKatana
         {
             WireUpProgressService();
 
+            if (IsSignedIn)
+            {
+                // Carried over from the scene the player just left. Nothing to fetch, nothing to
+                // wait for — the menu draws itself signed in on its first frame, which is the
+                // whole point of SignInSession. The renewal timer is picked back up because the
+                // coroutine running it died with the previous scene's component.
+                StartRenewalTimer(Mathf.RoundToInt(SignInSession.SecondsLeft));
+
+                // Reads the record again and then sends whatever the last scene left in the
+                // outbox. Nothing waits for it: the menu is already drawn from the record carried
+                // over, so this only ever corrects what is on screen rather than filling it in.
+                // The flush is the important half — a run finished in the game scene while the
+                // token happened to be stale has been sitting on disk since.
+                if (ProgressService.Instance != null) ProgressService.Instance.OnSignedIn();
+
+                SignedInChanged?.Invoke();
+                return;
+            }
+
             // A stored refresh token is the whole point of "keep signed in": without this the menu
             // comes back signed out after every run, and the outbox it is holding never goes out.
-            if (CanResume && !IsSignedIn) StartCoroutine(RefreshRoutine(null));
+            if (CanResume) StartCoroutine(RefreshRoutine(null));
         }
 
         /// <summary>
@@ -223,6 +269,13 @@ namespace NeonKatana
             url.Append("&lang=").Append(UnityWebRequest.EscapeURL(CurrentLanguageTag()));
 
             if (UsesDeepLink) url.Append("&platform=android");
+
+            // Ask Google for the account chooser rather than whoever it saw last. Without this a
+            // player who is already signed in to one Gmail in their browser is sent straight back
+            // with the same account, however many times they press the button — which is what
+            // "I pick a different Gmail and nothing changes" looked like from the game's side. The
+            // Worker also asks for it, and asking twice costs nothing.
+            url.Append("&prompt=").Append(UnityWebRequest.EscapeURL("select_account consent"));
 
             Application.OpenURL(url.ToString());
 
@@ -439,7 +492,16 @@ namespace NeonKatana
         /// </summary>
         IEnumerator RefreshRoutine(Action<bool> onDone)
         {
-            string stored = refreshToken;
+            if (refreshing)
+            {
+                // Two refreshes at once spend the same grant twice, and Google answers the second
+                // one with invalid_grant — which used to look exactly like "this player is no
+                // longer welcome" and signed them out.
+                onDone?.Invoke(false);
+                yield break;
+            }
+
+            string stored = SignInSession.RefreshToken;
 
             if (string.IsNullOrEmpty(stored) || string.IsNullOrWhiteSpace(BaseUrl))
             {
@@ -447,6 +509,54 @@ namespace NeonKatana
                 yield break;
             }
 
+            refreshing = true;
+
+            try
+            {
+                yield return RefreshAttempts(stored, onDone);
+            }
+            finally
+            {
+                refreshing = false;
+            }
+        }
+
+        /// <summary>
+        /// Tries the refresh, and tries again when the failure was the network rather than the
+        /// grant. Nothing retried before: one refused request on a train signed the player out for
+        /// the rest of the session, and took the run waiting in the outbox with it.
+        /// </summary>
+        IEnumerator RefreshAttempts(string stored, Action<bool> onDone)
+        {
+            for (int attempt = 0; attempt < RefreshAttemptLimit; attempt++)
+            {
+                bool succeeded = false;
+                bool worthRetrying = false;
+
+                yield return RefreshOnce(stored, (ok, retry) => { succeeded = ok; worthRetrying = retry; });
+
+                if (succeeded)
+                {
+                    onDone?.Invoke(true);
+                    yield break;
+                }
+
+                if (!worthRetrying) break;
+
+                if (attempt + 1 < RefreshAttemptLimit)
+                    yield return new WaitForSecondsRealtime(RetryDelaySeconds * (attempt + 1));
+            }
+
+            onDone?.Invoke(false);
+        }
+
+        /// <summary>
+        /// One attempt. <c>onDone(succeeded, worthRetrying)</c> — the second flag separates "the
+        /// server said no" from "the request never arrived", which are not the same answer and
+        /// must not lead to the same place.
+        /// </summary>
+        IEnumerator RefreshOnce(string stored, Action<bool, bool> onDone)
+        {
             string body = JsonUtility.ToJson(new RefreshRequest { refreshToken = stored });
 
             using var request = new UnityWebRequest($"{BaseUrl}/auth/refresh", UnityWebRequest.kHttpVerbPOST)
@@ -464,16 +574,26 @@ namespace NeonKatana
 
             if (request.result != UnityWebRequest.Result.Success)
             {
-                // A refusal means the stored token is spent and the player has to sign in again.
-                // A network failure means nothing of the sort, so the token is kept and the next
-                // launch tries once more.
-                if (request.responseCode >= 400 && request.responseCode < 500)
+                string answered = AnswerFrom(request);
+
+                // Only a grant Google has actually rejected ends the session. Everything else —
+                // no signal, a timeout, a 500, a Worker that could not reach Google — leaves the
+                // refresh token exactly where it is, because none of those are statements about
+                // this player. Treating all of them as "signed out" is what turned one bad moment
+                // on the way back from a run into a menu that had forgotten who was playing.
+                if (SessionIsGenuinelyOver(request.responseCode, answered))
                 {
-                    Debug.Log($"The stored sign-in is no longer good, so the player is signed out: {AnswerFrom(request)}");
+                    Debug.Log($"The stored sign-in is no longer good, so the player is signed out: {answered}");
                     ForgetStoredSession();
+                    SignedInChanged?.Invoke();
+
+                    onDone?.Invoke(false, false);
+                    yield break;
                 }
 
-                onDone?.Invoke(false);
+                Debug.Log($"Could not renew the sign-in this time, keeping it: {request.responseCode} {request.error} {answered}");
+
+                onDone?.Invoke(false, true);
                 yield break;
             }
 
@@ -481,13 +601,39 @@ namespace NeonKatana
 
             if (answer == null || !answer.success || string.IsNullOrEmpty(answer.id_token))
             {
+                // A 200 that carries no token is the server saying the grant is spent.
                 ForgetStoredSession();
-                onDone?.Invoke(false);
+                SignedInChanged?.Invoke();
+
+                onDone?.Invoke(false, false);
                 yield break;
             }
 
             AcceptToken(answer.id_token, answer.refresh_token, answer.expires_in);
-            onDone?.Invoke(true);
+            onDone?.Invoke(true, false);
+        }
+
+        /// <summary>
+        /// Whether a failed refresh means this player has to go back through the browser.
+        /// <para>
+        /// The Worker answers <c>401</c> when Google reports <c>invalid_grant</c> — a token that
+        /// has been revoked, expired or already spent — and <c>502</c> when it could not get an
+        /// answer out of Google at all. Older deployments answer <c>400 refresh_failed</c> for
+        /// both, so the body is read as well: an unrecognised 400 is treated as temporary, which
+        /// is the direction that costs a player nothing if it is wrong.
+        /// </para>
+        /// </summary>
+        static bool SessionIsGenuinelyOver(long responseCode, string body)
+        {
+            if (responseCode == 401 || responseCode == 403) return true;
+
+            if (responseCode != 400) return false;
+
+            string said = body ?? string.Empty;
+
+            return said.Contains("invalid_grant") ||
+                   said.Contains("session_expired") ||
+                   said.Contains("missing_refresh_token");
         }
 
         /// <summary>
@@ -508,6 +654,19 @@ namespace NeonKatana
             yield return RefreshRoutine(null);
         }
 
+        /// <summary>
+        /// Restarts the renewal timer. Called on every new token and again whenever this component
+        /// is rebuilt by a scene load, because the coroutine keeping the old one fresh was
+        /// destroyed along with the scene that started it — so without this, a session carried
+        /// across a scene change would be renewed by nobody and quietly expire mid-run.
+        /// </summary>
+        void StartRenewalTimer(int secondsLeft)
+        {
+            if (keepingFresh != null) StopCoroutine(keepingFresh);
+
+            keepingFresh = StartCoroutine(KeepTokenFresh(secondsLeft));
+        }
+
         // --- Holding on to it ---
 
         /// <summary>
@@ -515,6 +674,13 @@ namespace NeonKatana
         /// </summary>
         void AcceptToken(string idToken, string newRefreshToken, int expiresInSeconds)
         {
+            // Read before anything below overwrites it. The device's own owner is the durable
+            // answer — it survives a restart, which SignInSession does not — so a player who
+            // closes the game and reopens it to sign in as somebody else is still spotted.
+            string previousPlayerId = !string.IsNullOrEmpty(SignInSession.PlayerId)
+                ? SignInSession.PlayerId
+                : PlayerProgress.Owner;
+
             GoogleClaims claims = ReadTokenPayload<GoogleClaims>(idToken);
 
             if (claims == null || string.IsNullOrEmpty(claims.email))
@@ -524,32 +690,61 @@ namespace NeonKatana
                 return;
             }
 
-            IdToken = idToken;
-            GoogleSubject = claims.sub;
-            Email = claims.email;
-            PlayerId = PlayerIdFromEmail(claims.email);
-            GoogleName = claims.name;
-            PictureUrl = claims.picture;
-            // No "?? PlayerId". The id is the address without its domain, and there is no state
-            // of this game in which showing somebody their own email address is the right answer
-            // to not knowing their name.
-            UserName = ShortenToNameLength(claims.name) ?? string.Empty;
+            string playerId = PlayerIdFromEmail(claims.email);
 
-            if (!string.IsNullOrEmpty(newRefreshToken)) refreshToken = newRefreshToken;
+            // Who was here a moment ago. Checked before anything is overwritten, because this is
+            // the only point at which both answers are still available.
+            bool somebodyElseWasSignedIn =
+                !string.IsNullOrEmpty(previousPlayerId) &&
+                !string.Equals(previousPlayerId, playerId, StringComparison.OrdinalIgnoreCase);
+
+            SignInSession.Remember(
+                idToken: idToken,
+                expiresInSeconds: expiresInSeconds,
+                playerId: playerId,
+                email: claims.email,
+                googleSubject: claims.sub,
+                googleName: claims.name,
+                // No "?? PlayerId". The id is the address without its domain, and there is no
+                // state of this game in which showing somebody their own email address is the
+                // right answer to not knowing their name.
+                userName: ShortenToNameLength(claims.name) ?? string.Empty,
+                pictureUrl: claims.picture);
+
+            SignInSession.RememberRefreshToken(newRefreshToken);
+
+            rememberedPlayerId = playerId;
+            rememberedUserName = SignInSession.UserName;
+
+            // ==========================================
+            // A different person is now holding the phone.
+            //
+            // Pressing the sign-in button while already signed in, choosing a second Google
+            // account, and coming back to a menu still showing the first one's name, picture and
+            // record — that is what this handles, and it is worth more than a tidy display. The
+            // device's totals and the queue of unsent runs both belonged to whoever just left, and
+            // what this game uploads is a running total rather than a difference. Left alone, the
+            // first account's high score became the second account's, and went to the server under
+            // their name on the very next flush.
+            //
+            // Nothing is lost by clearing: the server holds each account's real history, and
+            // RefreshProfile reads the new player's back down a moment from now.
+            // ==========================================
+            if (somebodyElseWasSignedIn) HandOverTo(playerId);
+            else PlayerProgress.ClaimFor(playerId);
 
             if (rememberMe)
             {
-                PlayerPrefs.SetString(PlayerIdKey, PlayerId);
-                PlayerPrefs.SetString(UserNameKey, UserName ?? string.Empty);
+                PlayerPrefs.SetString(PlayerIdKey, playerId);
+                PlayerPrefs.SetString(UserNameKey, SignInSession.UserName ?? string.Empty);
             }
 
-            if (keepSignedIn && !string.IsNullOrEmpty(refreshToken))
-                PlayerPrefs.SetString(RefreshTokenKey, refreshToken);
+            if (keepSignedIn && !string.IsNullOrEmpty(SignInSession.RefreshToken))
+                PlayerPrefs.SetString(RefreshTokenKey, SignInSession.RefreshToken);
 
             if (rememberMe || keepSignedIn) PlayerPrefs.Save();
 
-            if (keepingFresh != null) StopCoroutine(keepingFresh);
-            keepingFresh = StartCoroutine(KeepTokenFresh(expiresInSeconds));
+            StartRenewalTimer(expiresInSeconds);
 
             // A service that started after this one — the game scene's, for instance — has not had
             // the providers set on it yet.
@@ -559,6 +754,20 @@ namespace NeonKatana
             if (ProgressService.Instance != null) ProgressService.Instance.OnSignedIn();
 
             SignedInChanged?.Invoke();
+        }
+
+        /// <summary>
+        /// Everything the previous account left behind on this device, put away before the new one
+        /// starts using it: their record on screen, their unsent runs, and this device's totals.
+        /// </summary>
+        void HandOverTo(string playerId)
+        {
+            Debug.Log("A different account signed in, so this device's saved totals were handed over to it.");
+
+            if (ProgressService.Instance != null) ProgressService.Instance.OnAccountChanged(playerId);
+
+            PlayerProgress.ResetTotals();
+            PlayerProgress.ClaimFor(playerId);
         }
 
         /// <summary>
@@ -633,15 +842,25 @@ namespace NeonKatana
             return trimmed.Length >= MinNameLength ? trimmed : null;
         }
 
+        /// <summary>
+        /// Sends the player back to the browser to pick an account, even though one is already
+        /// signed in. This is what the sign-in button does when it is pressed a second time.
+        /// <para>
+        /// It deliberately does <b>not</b> sign the current player out first. The browser leg is
+        /// abandoned all the time — the player closes the tab, or thinks better of it — and
+        /// signing them out on the way there would punish them for changing their mind. The
+        /// account they end up with is settled in <see cref="AcceptToken"/> instead, which is the
+        /// first moment there is an answer to settle.
+        /// </para>
+        /// </summary>
+        public void SwitchAccount() => BeginSignIn();
+
         public void SignOut()
         {
-            IdToken = null;
-            PlayerId = null;
-            GoogleSubject = null;
-            GoogleName = null;
-            PictureUrl = null;
-            UserName = null;
-            Email = null;
+            SignInSession.Clear();
+
+            rememberedPlayerId = null;
+            rememberedUserName = null;
             pendingState = null;
             IsWaitingForBrowser = false;
 
@@ -661,7 +880,15 @@ namespace NeonKatana
 
         void ForgetStoredSession()
         {
-            refreshToken = null;
+            SignInSession.Clear();
+
+            rememberedPlayerId = null;
+            rememberedUserName = null;
+
+            // Reached from the refresh path as well as from SignOut, and that path had no way to
+            // say so: the session went, and the record stayed on screen — a name and a face with
+            // nothing behind them.
+            if (ProgressService.Instance != null) ProgressService.Instance.OnSignedOut();
 
             PlayerPrefs.DeleteKey(PlayerIdKey);
             PlayerPrefs.DeleteKey(UserNameKey);
