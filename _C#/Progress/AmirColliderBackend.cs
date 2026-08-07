@@ -190,6 +190,21 @@ namespace NeonKatana
             string token = IdToken;
             if (!string.IsNullOrEmpty(token)) request.SetRequestHeader("Authorization", $"Bearer {token}");
 
+            // ==========================================
+            // Which game's database this is about.
+            //
+            // Every request here already names the game in its path, and the Worker does not read
+            // it from there: Worker.js takes the game from this header, then `?game=`, and failing
+            // both from `Object.keys(GAMES)[0]` — the first game in the registry. Neon Katana is
+            // that game today, so every profile read and every score write has been landing in the
+            // right database by luck rather than by being addressed to it.
+            //
+            // SignInService has sent this header on /oauth/token and /auth/refresh for a while,
+            // with a comment saying exactly this. The data API — the half that carries the scores —
+            // never did.
+            // ==========================================
+            if (!string.IsNullOrEmpty(gameId)) request.SetRequestHeader("X-Game-ID", gameId);
+
             yield return request.SendWebRequest();
 
             if (request.result != UnityWebRequest.Result.Success)

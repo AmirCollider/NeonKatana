@@ -63,7 +63,7 @@ namespace NeonKatana
             {
                 string fromProvider = IdTokenProvider?.Invoke();
 
-                return !string.IsNullOrEmpty(fromProvider) ? fromProvider : SignInSession.IdToken;
+                return !string.IsNullOrEmpty(fromProvider) ? fromProvider : SignInSession.UsableIdToken;
             }
         }
 

@@ -105,7 +105,12 @@ namespace NeonKatana
         /// The Google id_token. Never written to disk: it expires anyway, and a stale one sitting
         /// on a shared device is worth more to somebody else than it is to this game.
         /// </summary>
-        public string IdToken => SignInSession.IdToken;
+        /// <summary>
+        /// The token to send, or null once it has expired. Expiry-aware on purpose: this is what
+        /// <see cref="ProgressService"/> puts on every request, and a token past its time is a
+        /// round trip that can only come back <c>401</c>.
+        /// </summary>
+        public string IdToken => SignInSession.UsableIdToken;
 
         /// <summary>
         /// The id the server keeps this player's row under. See <see cref="PlayerIdFromEmail"/> —

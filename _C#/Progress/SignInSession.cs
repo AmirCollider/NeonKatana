@@ -31,13 +31,39 @@ namespace NeonKatana
     public static class SignInSession
     {
         /// <summary>
-        /// How close to expiry a token stops counting as usable. A request that leaves here with
-        /// half a minute on the clock can still arrive expired.
+        /// The Google id_token as it was issued. Memory only — never written to disk, on purpose.
+        /// <para>
+        /// This is the raw value and may already have expired; <see cref="UsableIdToken"/> is what
+        /// callers should send.
+        /// </para>
         /// </summary>
-        const float ExpiryMarginSeconds = 60f;
-
-        /// <summary>The Google id_token. Memory only — never written to disk, on purpose.</summary>
         public static string IdToken { get; private set; }
+
+        /// <summary>
+        /// The token to actually put on a request, or null once it has expired.
+        /// <para>
+        /// The difference matters most in the game scene, which has no <see cref="SignInService"/>
+        /// in it and therefore nothing renewing anything. A token that ran out during a long run
+        /// was still handed to the progress service, which had no way of telling and sent it — one
+        /// guaranteed round trip to a <c>401</c> at the exact moment a run was trying to save.
+        /// Nothing was lost, because the run stays in the outbox and goes out from the menu once
+        /// the session is renewed, but the request was never worth making.
+        /// </para>
+        /// </summary>
+        public static string UsableIdToken =>
+            !string.IsNullOrEmpty(PlayerId) &&
+            !string.IsNullOrEmpty(IdToken) &&
+            Time.realtimeSinceStartup < ExpiresAt - SendMarginSeconds
+                ? IdToken
+                : null;
+
+        /// <summary>
+        /// How much of a token's remaining life is not worth spending. A request that leaves with
+        /// a few seconds on the clock can still arrive expired, and the server is the one deciding.
+        /// Kept off <see cref="IsSignedIn"/>, which answers a question about the player rather than
+        /// about a request, and should not report somebody signed out a minute early.
+        /// </summary>
+        const float SendMarginSeconds = 30f;
 
         /// <summary>
         /// <see cref="Time.realtimeSinceStartup"/> at which <see cref="IdToken"/> stops being
@@ -72,13 +98,6 @@ namespace NeonKatana
             !string.IsNullOrEmpty(IdToken) &&
             Time.realtimeSinceStartup < ExpiresAt;
 
-        /// <summary>
-        /// True when there is a token, but not for much longer. The service goes and gets a new
-        /// one on this rather than waiting for the old one to stop working mid-upload.
-        /// </summary>
-        public static bool NeedsRenewal =>
-            !string.IsNullOrEmpty(IdToken) && Time.realtimeSinceStartup >= ExpiresAt - ExpiryMarginSeconds;
-
         /// <summary>Seconds until the token expires, floored at zero.</summary>
         public static float SecondsLeft => Mathf.Max(0f, ExpiresAt - Time.realtimeSinceStartup);
 
@@ -110,17 +129,6 @@ namespace NeonKatana
         public static void RememberRefreshToken(string refreshToken)
         {
             if (!string.IsNullOrEmpty(refreshToken)) RefreshToken = refreshToken;
-        }
-
-        /// <summary>
-        /// Forgets the token but keeps who it belonged to. Used when a token expires without a
-        /// replacement: the player is still the same person, and the menu can go on showing their
-        /// name while a new token is fetched.
-        /// </summary>
-        public static void ForgetToken()
-        {
-            IdToken = null;
-            ExpiresAt = 0f;
         }
 
         public static void Clear()
