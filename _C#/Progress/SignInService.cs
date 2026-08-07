@@ -769,10 +769,17 @@ namespace NeonKatana
         {
             Debug.Log("A different account signed in, so this device's saved totals were handed over to it.");
 
-            if (ProgressService.Instance != null) ProgressService.Instance.OnAccountChanged(playerId);
-
+            // The totals go FIRST, and the announcement second.
+            //
+            // These were the other way round, and the order is the whole of what the player saw:
+            // OnAccountChanged raises ProfileChanged, the high-score label answers it by showing
+            // whatever PlayerProgress holds — and at that instant PlayerProgress still held the
+            // PREVIOUS account's record. Then the reset ran with nobody left to tell, so the new
+            // player was shown the old player's best and went on being shown it.
             PlayerProgress.ResetTotals();
             PlayerProgress.ClaimFor(playerId);
+
+            if (ProgressService.Instance != null) ProgressService.Instance.OnAccountChanged(playerId);
         }
 
         /// <summary>

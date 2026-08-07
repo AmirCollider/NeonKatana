@@ -294,6 +294,13 @@ namespace NeonKatana
                         $"The player's record could not be read, so this account has nothing on " +
                         $"the server yet: {error}", this);
 
+                    // Told anyway. Failing to read a record is itself news to anything showing
+                    // part of one — an account that has just changed has had its totals cleared,
+                    // and without this the labels keep the previous player's numbers until some
+                    // later read happens to succeed. Nothing here is stale afterwards: every
+                    // listener falls back to what the device holds, which is correct.
+                    ProfileChanged?.Invoke();
+
                     onDone?.Invoke();
                     return;
                 }

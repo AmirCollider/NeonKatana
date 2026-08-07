@@ -115,7 +115,8 @@ namespace NeonKatana
         IEnumerator SubmitRunRoutine(RunResult run, PlayerProfile totals, Action<bool, string> onDone)
         {
             string player = PlayerId;
-            string failure = null;
+            string scoreFailure = null;
+            string counterFailure = null;
 
             // The endpoint takes the number on its own, not an object around it. Written with the
             // invariant culture because this is a wire format: the server reads it with
@@ -124,14 +125,23 @@ namespace NeonKatana
                 UnityWebRequest.kHttpVerbPOST,
                 $"{baseUrl}/database/set/games/{gameId}/users/{player}/highScore",
                 run.score.ToString(CultureInfo.InvariantCulture),
-                (_, error) => failure = error);
+                (_, error) => scoreFailure = error);
 
-            if (failure != null)
-            {
-                onDone?.Invoke(false, failure);
-                yield break;
-            }
-
+            // ==========================================
+            // The counters go either way.
+            //
+            // This used to give up here when the score write failed, and the two are not the same
+            // fact: how many runs a player has finished and how long they have played are true
+            // whether or not this particular score beat their best or reached the server at all.
+            // While a new player's row was silently not being created, the score write answered
+            // 404 every time — so this line was never reached, and games_played and total_play_time
+            // stayed at zero on the server for good. That is exactly the "the score updates later
+            // but the run count and play time never do" this is being fixed for.
+            //
+            // Nothing is lost by trying both: the run is only taken out of the outbox when both
+            // succeeded, and the server takes the larger of the two totals, so a repeat is
+            // harmless.
+            // ==========================================
             string counters = JsonUtility.ToJson(new ProfileCounters
             {
                 gamesPlayed = totals.gamesPlayed,
@@ -142,7 +152,9 @@ namespace NeonKatana
                 UnityWebRequest.kHttpVerbPOST,
                 $"{baseUrl}/database/patch/games/{gameId}/users/{player}",
                 counters,
-                (_, error) => failure = error);
+                (_, error) => counterFailure = error);
+
+            string failure = scoreFailure ?? counterFailure;
 
             onDone?.Invoke(failure == null, failure);
         }
