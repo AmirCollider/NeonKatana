@@ -227,8 +227,10 @@ namespace NeonKatana
 
                 if (!succeeded)
                 {
-                    // Left in the outbox on purpose: the next flush will try it again.
-                    Debug.Log($"A finished run is waiting to be sent: {error}");
+                    // Left in the outbox on purpose: the next flush will try it again. A warning
+                    // because a score that has not reached the server is the thing a player
+                    // notices first, and "waiting" is only harmless while it is still trying.
+                    Debug.LogWarning($"A finished run could not be sent and is still queued: {error}", this);
                     return;
                 }
 
@@ -284,9 +286,14 @@ namespace NeonKatana
             {
                 if (profile == null)
                 {
-                    // Not worth interrupting the menu over: the local save is still the truth, and
-                    // the message is in the log for whoever is looking for it.
-                    Debug.Log($"The player's record could not be read: {error}");
+                    // A warning, not a note. This is the request that creates a new player's row
+                    // on the server, so when it fails nothing else about that account works
+                    // either — no record, no name, no place on the board — and the one line
+                    // saying why was sitting at the same level as everything routine.
+                    Debug.LogWarning(
+                        $"The player's record could not be read, so this account has nothing on " +
+                        $"the server yet: {error}", this);
+
                     onDone?.Invoke();
                     return;
                 }

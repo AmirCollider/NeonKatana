@@ -55,6 +55,21 @@ namespace NeonKatana
             Refresh();
         }
 
+        /// <summary>
+        /// Catches up on anything that changed while this screen was hidden.
+        /// <para>
+        /// <see cref="MenuScreens"/> switches whole canvases off, and this corner exists on both
+        /// of them. Signing in as somebody else while the account screen is closed raised every
+        /// event it needed — but a screen is only built once, so nothing asked it again when it
+        /// came back, and it went on showing the previous player until the scene was reloaded.
+        /// </para>
+        /// </summary>
+        void OnEnable()
+        {
+            // Start has not run yet on the first enable; it does its own Refresh.
+            if (signInService != null || progressService != null) Refresh();
+        }
+
         void OnDestroy()
         {
             if (signInService != null) signInService.SignedInChanged -= Refresh;

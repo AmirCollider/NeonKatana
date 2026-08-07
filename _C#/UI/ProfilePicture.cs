@@ -79,6 +79,19 @@ namespace NeonKatana
             Refresh();
         }
 
+        /// <summary>
+        /// Catches up on a change made while this screen was hidden. See <see cref="SignInDisplay"/>.
+        /// <para>
+        /// It matters twice over here: <see cref="Refresh"/> cannot start a download on a switched
+        /// off object, so a new player's face is not merely missed while the screen is closed — it
+        /// is skipped, and without this nothing would ever ask for it again.
+        /// </para>
+        /// </summary>
+        void OnEnable()
+        {
+            if (signInService != null || progressService != null) Refresh();
+        }
+
         void OnDestroy()
         {
             if (signInService != null) signInService.SignedInChanged -= Refresh;

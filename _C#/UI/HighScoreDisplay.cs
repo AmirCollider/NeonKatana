@@ -37,6 +37,12 @@ namespace NeonKatana
             ShowServerRecord();
         }
 
+        /// <summary>Catches up on a change made while this screen was hidden. See SignInDisplay.</summary>
+        void OnEnable()
+        {
+            if (progressService != null) ShowServerRecord();
+        }
+
         void OnDestroy()
         {
             if (progressService != null) progressService.ProfileChanged -= ShowServerRecord;
@@ -44,13 +50,26 @@ namespace NeonKatana
 
         void ShowServerRecord()
         {
-            if (!askTheServer || progressService == null) return;
+            if (!askTheServer || progressService == null)
+            {
+                Show(PlayerProgress.HighScore);
+                return;
+            }
 
             PlayerProfile profile = progressService.Profile;
 
-            // Silently keeping the local number is the right answer here: the menu should not
-            // scold a player for being offline.
-            if (profile == null) return;
+            if (profile == null)
+            {
+                // The device's own number, NOT whatever is already on the label.
+                //
+                // This used to return and leave the label alone, which is right when the answer is
+                // "we are offline" and wrong when the answer is "somebody else is signed in now".
+                // Switching accounts clears the record and raises this event, so the new player was
+                // shown the previous player's high score — and went on being shown it, because
+                // nothing else ever writes this label.
+                Show(PlayerProgress.HighScore);
+                return;
+            }
 
             if (profile.highScore > PlayerProgress.HighScore)
             {

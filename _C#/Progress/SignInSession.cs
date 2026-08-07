@@ -101,6 +101,25 @@ namespace NeonKatana
         /// <summary>Seconds until the token expires, floored at zero.</summary>
         public static float SecondsLeft => Mathf.Max(0f, ExpiresAt - Time.realtimeSinceStartup);
 
+        /// <summary>
+        /// Takes a new token and whoever it describes.
+        /// <para>
+        /// <b>A refreshed token describes less than the first one did.</b> Google fills <c>name</c>
+        /// and <c>picture</c> in on the authorisation-code exchange, and leaves them out of the
+        /// id_token it hands back for a refresh grant — that one carries little more than
+        /// <c>sub</c>, <c>email</c> and the timestamps. Overwriting with what arrived therefore
+        /// wiped both, on every renewal and on every launch that resumed a stored session: the
+        /// avatar fell back to the placeholder and the name fell back to "Player", and because
+        /// <see cref="SignInService"/> writes the name straight to <c>PlayerPrefs</c> afterwards,
+        /// the blank was saved over the good one and never came back.
+        /// </para>
+        /// <para>
+        /// So a missing field means "this token does not say", not "this player has none", and
+        /// what is already known is kept. Only for the <em>same</em> player: a token for somebody
+        /// else replaces everything, blanks included, because carrying one person's name or face
+        /// onto another's account is a far worse failure than showing no name at all.
+        /// </para>
+        /// </summary>
         public static void Remember(
             string idToken,
             int expiresInSeconds,
@@ -111,6 +130,10 @@ namespace NeonKatana
             string userName,
             string pictureUrl)
         {
+            bool samePlayer =
+                !string.IsNullOrEmpty(PlayerId) &&
+                string.Equals(PlayerId, playerId, System.StringComparison.OrdinalIgnoreCase);
+
             IdToken = idToken;
 
             // A server answering with a nonsense lifetime gets Google's own default rather than a
@@ -119,12 +142,19 @@ namespace NeonKatana
             ExpiresAt = Time.realtimeSinceStartup + lifetime;
 
             PlayerId = playerId;
-            Email = email;
-            GoogleSubject = googleSubject;
-            GoogleName = googleName;
-            UserName = userName;
-            PictureUrl = pictureUrl;
+            Email = Keep(email, Email, samePlayer);
+            GoogleSubject = Keep(googleSubject, GoogleSubject, samePlayer);
+            GoogleName = Keep(googleName, GoogleName, samePlayer);
+            UserName = Keep(userName, UserName, samePlayer);
+            PictureUrl = Keep(pictureUrl, PictureUrl, samePlayer);
         }
+
+        /// <summary>
+        /// The value that arrived, or the one already held when this token simply did not mention
+        /// it and it belongs to the same person.
+        /// </summary>
+        static string Keep(string arrived, string held, bool samePlayer) =>
+            !string.IsNullOrEmpty(arrived) || !samePlayer ? arrived : held;
 
         public static void RememberRefreshToken(string refreshToken)
         {
